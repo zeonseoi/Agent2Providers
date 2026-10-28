@@ -7,6 +7,7 @@
 //!   POST /api/accounts/{id}/growth/school    → action = "growth.school"
 //!   POST /api/accounts/{id}/growth/travel    → action = "growth.travel"
 //!   POST /api/growth/travel/run              → action = "growth.travel.batch"
+//!   （网关 2 小时定时器）                      → action = "growth.claim.due"
 //!   （签到末尾的连登管家）                     → action = "growth.streak.batch"
 //! ```
 //! 迁移时**返回形状逐字保留**：前端读的就是这些键，形状一变界面就白屏。
@@ -45,6 +46,7 @@ pub(super) const ACTIONS: &[&str] = &[
     "growth.school",
     "growth.travel",
     "growth.travel.batch",
+    "growth.claim.due",
     "growth.streak",
     "growth.streak.batch",
     "growth.daily",
@@ -118,6 +120,10 @@ pub(super) async fn dispatch(
             }
         }
         "growth.travel.batch" => batch_travel(ctx, provider_id).await,
+        // 到期前自动领取：网关的 2 小时定时器调这一个动作（定时器留在网关，
+        // 与官方 `auto_checkin` 的「网关调度、插件执行」同形），这里自己列账号、
+        // 判到期、领。
+        "growth.claim.due" => batch_claim_due(ctx, provider_id).await,
         // 单账号：网关批量入口里点名那一个（定时轮次扫全部时走 `.batch`）
         "growth.streak" => {
             let record = crate::store::record(ctx, provider_id, account).await?;
@@ -536,4 +542,196 @@ async fn batch_travel(ctx: &PluginCtx, provider_id: &str) -> Result<Value, Gatew
         "credit": credit,
         "failed": failed,
     }))
+}
+
+/// `growth.claim.due` —— 到期前自动领取一轮。
+///
+/// ── 为什么是批量动作 ────────────────────────────────────────
+/// 「扫哪些账号、哪些任务算到期、怎么领」全是这一家自己的知识；网关只需要
+/// 「每 2 小时触发一次」和「把结果记进台账」。所以账号枚举与判据都在这里，
+/// 网关那侧只剩定时器（与官方 `auto_checkin` 的「网关调度、插件执行」同形）。
+///
+/// ── 回包 ────────────────────────────────────────────────────
+/// `{at, accounts, actions[], claimed, failed}`。`actions[]` 只含**真动手**的
+/// 结论（领到 / 领取失败）—— 跳过类（已领 / 未到期 / 未解锁 / 不可伪造）不落，
+/// 否则台账每 2 小时会被「还在等」刷满。
+async fn batch_claim_due(ctx: &PluginCtx, provider_id: &str) -> Result<Value, GatewayError> {
+    let accounts = crate::store::list(ctx, provider_id).await?;
+    let mut actions: Vec<Value> = Vec::new();
+    let mut claimed = 0usize;
+    let mut failed = 0usize;
+    for record in &accounts {
+        // 企业号没有 CN 任务中心（与网关原来那段账号过滤同一判据）
+        let enterprise = record
+            .get("enterpriseId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty());
+        if enterprise {
+            continue;
+        }
+        let account_id = record.get("id").and_then(Value::as_str).unwrap_or("");
+        if account_id.is_empty() {
+            continue;
+        }
+        let name = record
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(account_id);
+        let Ok(account) = growth_account_of(record) else {
+            continue;
+        };
+        for task in merged_task_rows(&account).await {
+            let code = task.get("code").and_then(Value::as_str).unwrap_or("");
+            if code.is_empty() {
+                continue;
+            }
+            if task.get("status").and_then(Value::as_str) == Some("claimed") {
+                continue;
+            }
+            if !due_for_claim(&task) {
+                continue;
+            }
+            let payload = json!({ "code": code, "mode": "full" });
+            match growth_task(account_id, &account, &payload).await {
+                Ok(report) => match report.get("outcome").and_then(Value::as_str).unwrap_or("") {
+                    "done" => {
+                        claimed += 1;
+                        actions.push(json!({
+                            "accountId": account_id,
+                            "name": name,
+                            "code": code,
+                            "outcome": "claimed",
+                            "message": report.get("message").cloned().unwrap_or(Value::Null),
+                            "credit": report.get("credit").cloned().unwrap_or(Value::from(0)),
+                        }));
+                    }
+                    "failed" => {
+                        failed += 1;
+                        actions.push(json!({
+                            "accountId": account_id,
+                            "name": name,
+                            "code": code,
+                            "outcome": "failed",
+                            "error": report.get("message").cloned().unwrap_or(Value::Null),
+                        }));
+                    }
+                    // already / skipped：已领、未映射、不可伪造、未解锁 —— 不是事件
+                    _ => {}
+                },
+                Err(error) => {
+                    failed += 1;
+                    actions.push(json!({
+                        "accountId": account_id,
+                        "name": name,
+                        "code": code,
+                        "outcome": "failed",
+                        "error": error.message,
+                    }));
+                }
+            }
+        }
+    }
+    Ok(json!({
+        "at": crate::http::now_ms(),
+        "accounts": accounts.len(),
+        "actions": actions,
+        "claimed": claimed,
+        "failed": failed,
+    }))
+}
+
+/// 默认口径 + 小程序口径的任务行（同码不重复，默认口径优先）。
+///
+/// 与 `growth_status` 里那段合并同一判据：小程序限定任务只在带
+/// `X-Client-Platform: miniprogram` 的列表里下发，只看默认口径会漏掉它们。
+async fn merged_task_rows(account: &GrowthAccount) -> Vec<Value> {
+    let Ok(default_tasks) = growth::list_tasks(account, false).await else {
+        return Vec::new();
+    };
+    let mut rows: Vec<Value> = default_tasks.iter().map(task_row).collect();
+    let mut known: Vec<String> = rows
+        .iter()
+        .filter_map(|row| row.get("code").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+    if let Ok(mp_tasks) = growth::list_tasks(account, true).await {
+        for task in &mp_tasks {
+            let code = task.get("task_code").and_then(Value::as_str).unwrap_or("");
+            if code.is_empty() || known.iter().any(|item| item == code) {
+                continue;
+            }
+            known.push(code.to_string());
+            rows.push(task_row(task));
+        }
+    }
+    rows
+}
+
+/// 任务是否「快到期」：`validEnd` 非空、且北京时间的今天 ≥ 到期日 − 1 天。
+///
+/// 无期限（`validEnd` 为 null）的任务**不碰** —— 用户要的是「有结束时间的任务」。
+/// 解析不出日期按「不快到」保守处理：不报错，也不误领。
+fn due_for_claim(task: &Value) -> bool {
+    let Some(end) = task.get("validEnd").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(threshold) = claim_threshold_day(end) else {
+        return false;
+    };
+    // 日期键定长，字典序即时间序（见 crate::beijing）
+    crate::beijing::today_key() >= threshold
+}
+
+/// `validEnd`（带时区的 ISO 串）→「该领的那天」= 到期日 − 1 天的北京日期键。
+///
+/// 先换到 +08:00 再取日：晚上 23:59 的时刻不能被时区差推到次日。
+fn claim_threshold_day(end: &str) -> Option<String> {
+    let at = chrono::DateTime::parse_from_rfc3339(end).ok()?;
+    let end_day = at.with_timezone(&crate::beijing::offset()).date_naive();
+    Some((end_day - chrono::Days::new(1)).format("%Y-%m-%d").to_string())
+}
+
+#[cfg(test)]
+mod due_claim_tests {
+    //! 「到期前领取」的判据本身（原来是网关 `growth_claim_auto` 里的单元测试，
+    //! 判据搬到插件后跟着搬过来）。
+    use super::{claim_threshold_day, due_for_claim};
+    use serde_json::json;
+
+    /// 「该领的那天」= 到期日 − 1 天的北京日期键。
+    ///
+    /// 上游 `valid_end` 是带时区的 ISO 串，取**北京日期**再减一天：晚 23:59 的
+    /// 时刻不能被时区差推到次日（那会让「前一天」算错），所以先换到 +08:00 再取日。
+    #[test]
+    fn claim_threshold_is_one_day_before_expiry() {
+        assert_eq!(
+            claim_threshold_day("2026-11-02T23:59:00+08:00").as_deref(),
+            Some("2026-11-01")
+        );
+        // 跨月边界：11-01 的前一天是 10-31
+        assert_eq!(
+            claim_threshold_day("2026-11-01T00:00:00+08:00").as_deref(),
+            Some("2026-10-31")
+        );
+        // 非 +08:00 的来源：按北京日期换算后再减一天
+        assert_eq!(
+            claim_threshold_day("2026-11-02T16:30:00Z").as_deref(),
+            Some("2026-11-02")
+        );
+    }
+
+    /// 非法 / 无时区的串给 None（调用方据此保守不领）。
+    #[test]
+    fn claim_threshold_rejects_unparseable() {
+        assert_eq!(claim_threshold_day("").as_deref(), None);
+        assert_eq!(claim_threshold_day("2026-11-02").as_deref(), None);
+        assert_eq!(claim_threshold_day("not-a-date").as_deref(), None);
+    }
+
+    /// 无 `validEnd` 的任务不参与到期领取（用户要的是「有结束时间的任务」）。
+    #[test]
+    fn due_for_claim_ignores_tasks_without_valid_end() {
+        assert!(!due_for_claim(&json!({ "code": "x" })));
+        assert!(!due_for_claim(&json!({ "validEnd": serde_json::Value::Null })));
+    }
 }
