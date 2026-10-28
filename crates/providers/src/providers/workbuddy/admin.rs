@@ -249,6 +249,12 @@ fn task_row(task: &Value) -> Value {
         "target": progress.get("target").and_then(Value::as_i64).unwrap_or(0),
         "locked": task.get("locked").and_then(Value::as_bool).unwrap_or(false),
         "unlockAt": task.get("unlock_at").cloned().unwrap_or(Value::Null),
+        // 任务有效期（上游 `valid_start` / `valid_end`，ISO 8601 带时区串）。
+        // 网关的「到期前自动领取」按 `validEnd` 判「今天 ≥ 到期日 − 1 天」，
+        // 界面在任务行上显示「到期 YYYY-MM-DD」—— 缺这两个键时那两处都拿不到
+        // 日期，功能会静默失效（没有报错，只是永远不命中）。
+        "validStart": task.get("valid_start").cloned().unwrap_or(Value::Null),
+        "validEnd": task.get("valid_end").cloned().unwrap_or(Value::Null),
         // 是否在映射表里（未映射任务在执行时会保守跳过 —— 界面如实标注）
         "supported": spec.is_some(),
         "unforgeable": spec.as_ref().map(|spec| spec.unforgeable).unwrap_or(false),
@@ -374,7 +380,8 @@ async fn growth_status(account_id: &str, account: &GrowthAccount) -> Result<Valu
 /// `growth.task` —— 执行**单个**任务（`payload = {code, mode}`）。
 ///
 /// `mode=full`（缺省）：accept（若未接单）→ 点亮上报 → 回读 → claim；
-/// `mode=claim`：只领奖（已完成/已领走幂等 claim，未完成跳过）。
+/// `mode=claim`：只领奖（已完成/已领走幂等 claim，未完成跳过）；
+/// `mode=light`：只点亮、不领奖（奖励留给用户手点「领取」）。
 async fn growth_task(
     account_id: &str,
     account: &GrowthAccount,
@@ -429,10 +436,16 @@ async fn growth_task(
                 energy,
             }
         }
-    } else if code == "first_buddy" {
-        growth::process_first_buddy(account, &task).await
     } else {
-        growth::process_task(account, code, &task).await
+        // `light` = 只点亮不领奖（界面每任务那颗「完成」按钮）；其余（含缺省
+        // 的 `full`）达成即领奖。两档共用同一条 accept → 上报 → 回读流程，
+        // 只在「读回包确认达成」之后分叉。
+        let auto_claim = mode != "light";
+        if code == "first_buddy" {
+            growth::process_first_buddy(account, &task, auto_claim).await
+        } else {
+            growth::process_task(account, code, &task, auto_claim).await
+        }
     };
     Ok(json!({
         "id": account_id,
