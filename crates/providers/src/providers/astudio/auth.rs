@@ -31,13 +31,13 @@ use agent2api_provider_protocol as proto;
 use reqwest::multipart::Form;
 use serde_json::{json, Value};
 
+use super::client::decorate;
+use super::endpoints;
 use crate::http;
+use crate::http::AccountRequest;
 
-/// 账号服务根（生产环境）。
-pub const AUTH_BASE: &str = "https://agent.xfyun.cn/xingchen-studio/";
-
-/// 桌面端版本（安装包 `package.json` 的 version，用于 `studioVersion` 头）。
-const STUDIO_VERSION: &str = "3.5.1";
+/// 账号服务根（生产环境，与余额、签到共用）。
+pub const AUTH_BASE: &str = endpoints::STUDIO_API_BASE;
 
 /// 极验三件（页面完成滑块后拿到的）。
 #[derive(Clone, Debug, Default)]
@@ -83,27 +83,8 @@ impl Session {
     }
 }
 
-fn client_type() -> Option<&'static str> {
-    if cfg!(target_os = "windows") {
-        Some("21")
-    } else if cfg!(target_os = "macos") {
-        Some("22")
-    } else {
-        None
-    }
-}
-
 fn client(proxy: Option<&proto::WireProxy>, gateway_proxy: &str) -> reqwest::Client {
     http::control_client(proxy, gateway_proxy)
-}
-
-/// 给请求加上桌面端身份头。
-fn decorate(mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    if let Some(kind) = client_type() {
-        request = request.header("clientType", kind);
-    }
-    request = request.header("studioVersion", STUDIO_VERSION);
-    request
 }
 
 fn message_of(value: &Value) -> String {
@@ -155,6 +136,7 @@ async fn get_value(
         request = request.header("Cookie", cookie);
     }
     let response = decorate(request)
+        .with_account_user_agent()
         .send()
         .await
         .map_err(|error| format!("{operation}网络失败：{}", http::describe(&error)))?;
@@ -191,6 +173,7 @@ async fn post_form(
         request = request.header("Cookie", cookie);
     }
     let response = decorate(request)
+        .with_account_user_agent()
         .send()
         .await
         .map_err(|error| format!("{operation}网络失败：{}", http::describe(&error)))?;
@@ -223,6 +206,7 @@ async fn post_empty(
         .header("Cookie", cookie)
         .timeout(std::time::Duration::from_secs(20));
     let response = decorate(request)
+        .with_account_user_agent()
         .send()
         .await
         .map_err(|error| format!("{operation}网络失败：{}", http::describe(&error)))?;
@@ -380,7 +364,7 @@ async fn complete(
     if let Ok(value) = post_empty(
         proxy,
         gateway_proxy,
-        "tenant-app/v2/init-app",
+        endpoints::INIT_APP,
         &cookie,
         "初始化账号",
     )

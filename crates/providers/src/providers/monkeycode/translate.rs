@@ -335,6 +335,8 @@ pub(super) struct Handled {
     pub(super) reply: Option<String>,
     /// 终态（None = 继续）
     pub(super) terminal: Option<Terminal>,
+    /// 心跳和历史游标不算模型进展，不能延后无输出超时。
+    pub(super) progress: bool,
 }
 
 // ─── 下行消息处理 ──────────────────────────────────────────────
@@ -349,7 +351,8 @@ pub(super) fn handle_message(translator: &mut Translator, raw: &str) -> Handled 
             return Handled::default();
         }
     };
-    match parsed.get("type").and_then(Value::as_str).unwrap_or("") {
+    let frame_type = parsed.get("type").and_then(Value::as_str).unwrap_or("");
+    let mut handled = match frame_type {
         // 心跳：回一条 ping（参考 `task-runner.ts` 的 `msg.type === "ping"`）
         "ping" => Handled {
             reply: Some(json!({ "type": "ping" }).to_string()),
@@ -396,7 +399,11 @@ pub(super) fn handle_message(translator: &mut Translator, raw: &str) -> Handled 
             );
             Handled::default()
         }
-    }
+    };
+    handled.progress = handled.progress || !handled.frames.is_empty()
+        || frame_type == "task-started"
+        || (frame_type != "ping" && handled.reply.is_some());
+    handled
 }
 
 /// `permission-req` → `permission-resp`（自动批准）。
@@ -637,7 +644,7 @@ fn handle_acp(translator: &mut Translator, acp: &Value) -> Handled {
                     frames: vec![frame],
                     ..Handled::default()
                 },
-                None => Handled::default(),
+                None => Handled { progress: !status.is_empty(), ..Handled::default() },
             }
         }
         "usage_update" => {
@@ -703,18 +710,18 @@ fn auto_reply_question(payload: Option<&Value>) -> Option<String> {
     ))
 }
 
-/// `task-error` / `error` 的 data → 可读原因（先 `decode_data`，再按字符串 /
-/// 对象取 error/message/msg/detail；都没有时给一句兜底）。
+/// `task-error` / `error` 的 data → 可读原因（先 `decode_data`）。
+/// 对象优先取详细原因，再回落 message 等摘要；都没有时给一句兜底。
 fn error_detail(data: Option<&Value>) -> String {
     // 解不出来就退回原值（可能是一条裸的纯文本错误串），别把原因整个丢掉。
     let decoded = decode_data(data).or_else(|| data.cloned());
     match decoded {
         Some(Value::String(text)) if !text.trim().is_empty() => text.trim().to_string(),
-        Some(Value::Object(object)) => ["error", "message", "msg", "detail"]
+        Some(Value::Object(object)) => ["details", "detail", "error", "message", "msg"]
             .iter()
-            .find_map(|key| object.get(*key).and_then(Value::as_str))
-            .map(|text| text.trim().to_string())
-            .filter(|text| !text.is_empty())
+            .find_map(|key| object.get(*key).and_then(Value::as_str)
+                .map(str::trim).filter(|text| !text.is_empty()))
+            .map(str::to_string)
             .unwrap_or_else(|| "任务执行出错（上游未给原因）".to_string()),
         _ => "任务执行出错（上游未给原因）".to_string(),
     }

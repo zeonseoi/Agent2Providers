@@ -52,6 +52,7 @@ mod ids;
 mod json;
 mod limits;
 mod model_rules;
+mod native_search;
 mod paths;
 mod proxy_util;
 mod queue;
@@ -76,6 +77,7 @@ fn main() {
         providers::registry(),
         agent2api_provider_sdk::ServeOptions {
             on_init: Some(|env| paths::init(&env.data_dir)),
+            account_user_agent: Some(|_| true),
         },
     );
 }
