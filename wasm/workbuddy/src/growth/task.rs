@@ -85,8 +85,11 @@ pub fn run(account: &GrowthAccount, payload: &Value) -> Result<Value, String> {
         return Err("成长任务码无效".into());
     }
     let mode = util::text(payload, &["mode"]);
-    if !matches!(mode.as_str(), "" | "full" | "claim") {
-        return Err("任务模式只能为full或claim".into());
+    // light（只点亮、不领奖，奖励留给用户手点「领取」）：与原生实现的 `mode=light`
+    // 同义。它让「一键完成」与「领取」两个动作各自幂等、互不代劳 —— 上游归账有
+    // 延迟，合并成一趟会把「刚点亮、还没归账」的任务判成未完成而跳过领奖。
+    if !matches!(mode.as_str(), "" | "full" | "claim" | "light") {
+        return Err("任务模式只能为full、claim或light".into());
     }
     let spec = spec::spec_of(&code);
     let mp = spec.as_ref().is_some_and(|s| s.mp);
@@ -117,6 +120,11 @@ fn process(
         );
     }
     if state == "completed" || target > 0 && current >= target {
+        // 只点亮模式：已完成就停，领奖留给用户手点「领取」。
+        if mode == "light" {
+            return Ok(json!({ "outcome": "done",
+                "message": format!("已完成（{current}/{target}），待手动领取"), "credit": 0, "energy": 0 }));
+        }
         return claim(account, code, spec.is_some_and(|s| s.mp));
     }
     if mode == "claim" {
@@ -140,6 +148,18 @@ fn process(
     if code == "first_buddy" {
         let mut adopted = travel::adopt(account)?;
         if adopted["outcome"] != "adopt" {
+            return Ok(adopted);
+        }
+        // 只点亮模式：领养照做（它本身给的积分是领养动作的收益，不是任务奖励），
+        // 任务奖励留给用户手点「领取」。
+        if mode == "light" {
+            adopted["outcome"] = json!("done");
+            let base = adopted
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            adopted["message"] = json!(format!("{base}；任务已完成，待手动领取"));
             return Ok(adopted);
         }
         let reward = (|| {
@@ -207,6 +227,11 @@ fn process(
         );
     }
     if status == "completed" || target > 0 && progress >= target {
+        // 只点亮模式：报完就停，领奖留给用户手点「领取」。
+        if mode == "light" {
+            return Ok(json!({ "outcome": "done",
+                "message": format!("已点亮（{progress}/{target}），待手动领取"), "credit": 0, "energy": 0 }));
+        }
         return claim(account, code, spec.mp);
     }
     Ok(skipped(&format!(
