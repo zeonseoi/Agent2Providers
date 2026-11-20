@@ -60,8 +60,8 @@ pub fn open_chat(
     headers["Content-Type"] = Value::String("application/json".into());
     http::open_json_resource("POST", &endpoints::url(origin, path)?, headers, body, MAX_CHAT_BODY)
         .map_err(|mut error| {
-            // 上限错误已带可读原因，只有真正的传输/资源失败才换成笼统文案。
-            if error.code.as_deref() != Some("plugin_request_too_large") {
+            // 上限与宿主校验错误已带可读原因，只有真正的传输/资源失败才换成笼统文案。
+            if !matches!(error.code.as_deref(), Some("plugin_request_too_large" | "bad_params")) {
                 error.message = "WorkBuddy网络请求未完成".into();
             }
             error
