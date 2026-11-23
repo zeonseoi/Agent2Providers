@@ -6,15 +6,19 @@ use agent2api_wasm_sdk::{self as sdk, json, AccountLock, Error, Result, Value};
 
 const CONTROL: &str = "refresh-control";
 
-pub fn expiring(secret: &Value) -> bool {
+pub fn expiring_within(secret: &Value, min_lead_ms: i64) -> bool {
+    let margin = endpoints::REFRESH_MARGIN.max(min_lead_ms.max(0));
     account::expires(secret)
-        .is_some_and(|at| at.saturating_sub(endpoints::REFRESH_MARGIN) <= sdk::now())
+        .is_some_and(|at| at.saturating_sub(margin) <= sdk::now())
 }
-pub fn due() -> Result<bool> {
+pub fn expiring(secret: &Value) -> bool {
+    expiring_within(secret, 0)
+}
+pub fn due(min_lead_ms: i64) -> Result<bool> {
     let initial = account::read()?;
     if initial.local {
         let status = sdk::desktop_refresh::status(endpoints::PROVIDER)?;
-        return Ok(status["authorized"] == true && status["refreshable"] == true && expiring(&initial.secret));
+        return Ok(status["authorized"] == true && status["refreshable"] == true && expiring_within(&initial.secret, min_lead_ms));
     }
     if account::refresh_token(&initial.secret).is_empty() {
         return Ok(false);
@@ -24,35 +28,17 @@ pub fn due() -> Result<bool> {
     if !account::same(&initial, &snapshot) {
         return Ok(false);
     }
-    if !sdk::refresh_guard::available("credential-refresh", &account::refresh_token(&snapshot.secret))? { return Ok(false); }
     let before = util::transient(CONTROL)?;
     if !before.compatible {
         return Err(Error::http(409, "AutoClaw 续期状态格式已变化，请重新发起"));
     }
-    let stamp = account::stamp(&snapshot);
-    let now = sdk::now();
-    let same_control = before.compatible && before.value["stamp"] == stamp;
-    // 临期巡检也不能抹掉未知续期的在途保护，否则一次性 refresh 会被再次消费。
-    if same_control && before.value["inFlightUntil"].as_i64().unwrap_or(0) > now {
-        return Ok(false);
-    }
-    if expiring(&snapshot.secret) {
+    if expiring_within(&snapshot.secret, min_lead_ms) {
         return Ok(true);
     }
-    if same_control
-        && now.saturating_sub(before.value["hourlyAt"].as_i64().unwrap_or(0))
-            < endpoints::HOURLY_REFRESH
-    {
-        return Ok(false);
-    }
-    // 与原生一致：首次维护即到期，失败也按小时节流；保留在途与来源信息。
-    let mut next = if same_control && before.value.is_object() {
-        before.value.clone()
-    } else {
-        json!({ "stamp": stamp })
-    };
-    next["hourlyAt"] = json!(now);
-    util::put(CONTROL, &before, next, 86_400_000)
+    // 维护间隔只从成功续期起算，失败不阻挡下一轮调度。
+    Ok(before.value["stamp"] != account::stamp(&snapshot)
+        || sdk::now().saturating_sub(before.value["refreshedAt"].as_i64().unwrap_or(0))
+            >= endpoints::HOURLY_REFRESH)
 }
 
 pub fn ensure() -> Result<String> {
@@ -101,52 +87,12 @@ fn run(force: bool) -> Result<String> {
     if !before.compatible {
         return Err(Error::http(409, "AutoClaw 续期状态格式已变化，请重新发起"));
     }
-    let mut control = before.value.clone();
-    if !control.is_object() || control["stamp"] != account::stamp(&current) {
-        control = json!({ "stamp": account::stamp(&current) });
-    }
+    // 并发只由当前调用持有的账号锁保护，不用历史失败标记拦截后续续期。
     let now = sdk::now();
-    if control["inFlightUntil"].as_i64().unwrap_or(0) > now {
-        return Err(Error::http(
-            409,
-            "AutoClaw 上一轮续期结果尚未确认，请稍后重试或重新登录",
-        ));
-    }
-    control["inFlightUntil"] = json!(now + 120_000);
-    control["hourlyAt"] = json!(now);
-    if !util::put(CONTROL, &before, control, 86_400_000)? {
-        return Err(Error::http(409, "AutoClaw 续期状态已变化"));
-    }
-    let reserved = util::transient(CONTROL)?;
-    let reservation = sdk::refresh_guard::Reservation::acquire("credential-refresh", &refresh)?;
-    let next = match upstream(&current.secret) {
-        Ok(secret) => secret,
-        Err(error) => {
-            // 明确拒绝可以解除在途；连接中断无法知道上游是否轮换，保留短冷却。
-            if error.upstream_code.is_some()
-                || error
-                    .status
-                    .is_some_and(|status| (400..500).contains(&status))
-            {
-                let _ = util::put(
-                    CONTROL,
-                    &reserved,
-                    json!({ "stamp": account::stamp(&current), "hourlyAt": now }),
-                    86_400_000,
-                );
-            }
-            return Err(error);
-        }
-    };
+    let next = upstream(&current.secret)?;
     let unchanged = account::access(&next) == account::access(&current.secret)
         && account::refresh_token(&next) == refresh;
     if unchanged && account::expires(&next).is_none_or(|expires| expires <= sdk::now()) {
-        let _ = util::put(
-            CONTROL,
-            &reserved,
-            json!({ "stamp": account::stamp(&current), "hourlyAt": now }),
-            86_400_000,
-        );
         return Err(Error::http(
             409,
             "AutoClaw 续期仍返回已过期或无法确认有效期的旧凭据，请重新登录",
@@ -199,12 +145,10 @@ fn run(force: bool) -> Result<String> {
     }
     let finished = account::read()?;
     let token = current_token(&current, &finished)?;
-    reservation.complete()?;
-    let snapshot = util::transient(CONTROL)?;
     util::put(
         CONTROL,
-        &snapshot,
-        json!({ "stamp": account::stamp(&finished), "hourlyAt": now }),
+        &before,
+        json!({ "stamp": account::stamp(&finished), "refreshedAt": now }),
         86_400_000,
     )?;
     Ok(token)

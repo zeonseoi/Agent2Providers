@@ -4,10 +4,10 @@ pub mod catalog;
 pub mod client_device;
 pub mod desktop_launch;
 pub mod desktop_refresh;
+pub mod error_rules;
 pub mod http;
 pub mod images;
 pub mod login;
-pub mod legacy_credentials;
 pub mod protocol;
 pub mod request;
 pub mod refresh_guard;
@@ -75,6 +75,11 @@ pub fn native_call(helper: &str, operation: &str, payload: Value) -> Result<Valu
 
 pub fn account() -> Result<Value> { host("account.get", json!({})) }
 
+/// 从入站参数按值移出 `body`，避免长上下文场景在插件内存里长期保留两份请求树。
+pub fn take_body(params: &mut Value) -> Option<Value> {
+    params.as_object_mut().and_then(|object| object.remove("body"))
+}
+
 pub fn account_disabled(record: &Value) -> bool {
     record["public"]["enabled"] == false
         && record["usageQueryCall"] != true && record["accountMaintenanceCall"] != true
@@ -117,6 +122,20 @@ pub fn stream_bytes(bytes: &[u8]) -> Result<()> {
 }
 pub fn stream_event(value: &Value) -> Result<()> {
     stream_bytes(format!("data: {value}\n\n").as_bytes())
+}
+
+/// 从 `token.expiring` 入参提取维护链路传入的最小提前量（毫秒），并与提供商默认窗口取较大值。
+pub fn expiring_lead(params: &Value, default_lead_ms: i64) -> i64 {
+    let requested = params
+        .get("minLeadMs")
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_f64().filter(|n| n.is_finite()).map(|n| n as i64))
+        })
+        .unwrap_or(0)
+        .max(0);
+    default_lead_ms.max(0).max(requested)
 }
 
 #[macro_export]

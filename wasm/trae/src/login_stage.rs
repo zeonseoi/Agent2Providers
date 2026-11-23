@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use crate::{i18n, util, PROVIDER_ID};
 
-const ORIGIN: &str = "https://api.trae.cn";
+const ORIGIN: &str = "https://www.trae.cn";
 
 pub fn invalid() -> Error {
     Error::http(
@@ -108,7 +108,7 @@ pub fn variant(params: &Value, context: &managed::Context) -> Result<&'static st
     }) || payload["methodIndex"].as_u64() != Some(context.method_index)
         || payload
             .get("mode")
-            .is_some_and(|value| !matches!(value.as_str(), Some("external" | "auto")))
+            .is_some_and(|value| !matches!(value.as_str(), Some("external" | "embedded" | "auto")))
     {
         return Err(invalid());
     }
@@ -156,7 +156,7 @@ fn authorization(raw: &str) -> Result<()> {
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
-        || !raw.starts_with("https://api.trae.cn/authorization?")
+        || !raw.starts_with("https://www.trae.cn/authorization?")
     {
         return Err(invalid());
     }
@@ -200,12 +200,11 @@ pub fn prepare(context: &managed::Context, variant: &str) -> Result<Prepared> {
 }
 
 pub fn publish(context: &managed::Context, prepared: &Prepared, locale: &str) -> Result<Value> {
-    // SDK通用publish_browser默认手填=true，不适用于Trae无state原监听回调。
     let step = sdk::host(
         "login.step.publish",
         json!({ "expected": context.interaction, "title": i18n::web_title(locale), "message": i18n::web(locale),
             "captcha": null, "browser": { "url": prepared.authorization_url, "leaseId": prepared.lease_id,
-                "browserMode": "external", "manualCallback": false, "callbackInput": "url" } }),
+                "browserMode": "external", "manualCallback": true, "callbackInput": "url" } }),
     )?;
     exact(
         &step,
@@ -255,8 +254,8 @@ pub fn publish(context: &managed::Context, prepared: &Prepared, locale: &str) ->
         &["url", "browserMode", "manualCallback", "callbackInput"],
     )?;
     if step["browser"]["url"] != prepared.authorization_url
-        || step["browser"]["browserMode"] != "external"
-        || step["browser"]["manualCallback"] != false
+        || !matches!(step["browser"]["browserMode"].as_str(), Some("external" | "embedded"))
+        || step["browser"]["manualCallback"] != true
         || step["browser"]["callbackInput"] != "url"
     {
         return Err(invalid());

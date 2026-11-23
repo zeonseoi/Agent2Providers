@@ -86,8 +86,8 @@ pub fn start(params: &Value) -> Result<Value> {
     Ok(
         json!({ "flow": flow, "url": url.to_string(), "poll_interval_ms": interval,
         "instructions": instructions(locale),
-        "external_browser": true, "allowed_hosts": ["zcode.z.ai", "bigmodel.cn", "open.bigmodel.cn"],
-        "login_ui": { "browserMode": "external", "manualCallback": false, "callbackInput": "url", "cookieCapture": null, "captureCallback": false } }),
+        "external_browser": false, "allowed_hosts": ["zcode.z.ai", "bigmodel.cn", "open.bigmodel.cn"],
+        "login_ui": { "browserMode": "choice", "manualCallback": false, "callbackInput": "url", "cookieCapture": null, "captureCallback": false } }),
     )
 }
 
@@ -218,6 +218,10 @@ fn step(state: &mut Value) -> Result<Option<Value>> {
             return Err(Error::http(502, "ZCode 国内版登录结果缺少访问令牌"));
         }
         state["oauth"] = json!(oauth);
+        state["refreshToken"] = json!(account::strip_bearer(&text(
+            &data["bigmodel"],
+            &["refresh_token", "refreshToken"]
+        )));
         state["jwt"] = json!(account::strip_bearer(&text(data, &["token"])));
         state["userId"] = json!(account::user(&data["user"]));
         state["name"] = data["user"]["name"].clone();
@@ -294,15 +298,15 @@ pub fn methods(locale: &str) -> Value {
         ],
     };
     let fields = match locale {
-        "en" => ["User ID", "Device UUID", "Plan channel", "Coding Plan", "Start Plan", "Choose the matching credential: API key for Coding Plan, JWT for Start Plan. User ID may be omitted for existing credentials; such records are deduplicated by credentials, not a stable user identity."],
-        "ja" => ["ユーザー ID", "デバイス UUID", "プラン経路", "Coding Plan", "Start Plan", "Coding Plan は API Key、Start Plan は JWT を使用します。既存の認証情報はユーザー ID を省略できますが、固定ユーザー ID ではなく認証情報で重複を判定します。"],
-        "ko" => ["사용자 ID", "기기 UUID", "요금제 경로", "Coding Plan", "Start Plan", "Coding Plan은 API Key, Start Plan은 JWT를 사용합니다. 기존 인증 정보의 사용자 ID는 생략할 수 있으며, 이 경우 고정 사용자 신원이 아닌 인증 정보로 중복을 판별합니다."],
-        "pt-BR" => ["ID do usuário", "UUID do dispositivo", "Canal do plano", "Coding Plan", "Start Plan", "Use a chave API para Coding Plan e JWT para Start Plan. O ID pode ser omitido em credenciais existentes; nesse caso a deduplicação usa as credenciais, não uma identidade estável."],
-        "zh-Hant" => ["使用者 ID", "裝置 UUID", "套餐通道", "編碼套餐", "套餐池", "編碼套餐使用 API Key，套餐池使用 JWT。舊憑證可不填使用者 ID，但此類記錄按憑證去重，沒有固定使用者身分。"],
-        _ => ["用户 ID", "设备 UUID", "套餐通道", "编码套餐", "套餐池", "编码套餐使用 API Key，套餐池使用 JWT。旧凭据可不填用户 ID，但此类记录按凭据去重，没有固定用户身份。"],
+        "en" => ["User ID", "Device UUID", "Plan channel", "Coding Plan", "Start Plan", "Use an API Key for Coding Plan or a JWT for Start Plan.", "Select or paste a ZCode credential file to import the account."],
+        "ja" => ["ユーザー ID", "デバイス UUID", "プラン経路", "Coding Plan", "Start Plan", "Coding Plan は API Key、Start Plan は JWT を入力してください。", "ZCode の認証ファイルを選択または貼り付けてアカウントを取り込めます。"],
+        "ko" => ["사용자 ID", "기기 UUID", "요금제 경로", "Coding Plan", "Start Plan", "Coding Plan은 API Key, Start Plan은 JWT를 입력하세요.", "ZCode 인증 파일을 선택하거나 붙여넣어 계정을 가져올 수 있습니다."],
+        "pt-BR" => ["ID do usuário", "UUID do dispositivo", "Canal do plano", "Coding Plan", "Start Plan", "Use uma API Key para Coding Plan ou um JWT para Start Plan.", "Selecione ou cole um arquivo de credenciais do ZCode para importar a conta."],
+        "zh-Hant" => ["使用者 ID", "裝置 UUID", "套餐通道", "編碼套餐", "套餐池", "編碼套餐請填寫 API Key，套餐池請填寫 JWT。", "選擇或貼上 ZCode 憑據檔案即可匯入帳號。"],
+        _ => ["用户 ID", "设备 UUID", "套餐通道", "编码套餐", "套餐池", "编码套餐请填写 API Key，套餐池请填写 JWT。", "选择或粘贴 ZCode 凭据文件即可导入账号。"],
     };
     json!({ "methods": [
-        { "methodIndex": 0, "type": "oauth", "label": labels[0], "prompts": [], "browserMode": "external", "manualCallback": false, "instructions": labels[1] },
+        { "methodIndex": 0, "type": "oauth", "label": labels[0], "prompts": [], "browserMode": "choice", "manualCallback": false, "instructions": labels[1] },
         { "methodIndex": 1, "type": "api", "label": labels[2], "instructions": fields[5], "prompts": [
             { "key": "accessToken", "type": "text", "label": "Access Token / API Key", "secret": true, "optional": true },
             { "key": "jwt", "type": "text", "label": "Start Plan JWT", "secret": true, "optional": true },
@@ -311,7 +315,7 @@ pub fn methods(locale: &str) -> Value {
             { "key": "zcodePlan", "type": "select", "label": fields[2], "optional": true, "default": "coding-plan",
                 "options": [{ "value": "coding-plan", "label": fields[3] }, { "value": "start-plan", "label": fields[4] }] }
         ] },
-        { "methodIndex": 2, "type": "api", "label": labels[3], "prompts": [
+        { "methodIndex": 2, "type": "api", "label": labels[3], "instructions": fields[6], "prompts": [
             { "key": "credentialJson", "type": "text", "label": labels[4], "secret": true }
         ] }
     ] })

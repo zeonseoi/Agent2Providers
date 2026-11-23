@@ -1,8 +1,8 @@
 {
   "id": "agent2api-wasm-kiro",
   "name": "Kiro",
-  "description": "独立 Kiro 提供商，包含双阶段托管网页登录、AWS 企业认证地区、API key、社交与外部身份凭据续期、账号模型目录、额度、AWS 二进制流对话和网页搜索。本机 IDE / CLI 引用经独立授权后续期并安全写回；未经真实账号验收。",
-  "version": "0.1.0-beta.1",
+  "description": "提供流式对话与独立网页搜索，支持网页登录、企业认证、密钥及本机导入与续期，可查看模型与额度。",
+  "version": "0.1.0-beta.3",
   "protocol": 1,
   "license": "AGPL-3.0-only",
   "providers": [

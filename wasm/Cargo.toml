@@ -22,7 +22,6 @@ members = [
     "monkeycode",
     "monkeycode-intl",
     "lobsterai",
-    "orcaterm",
     "qoder",
     "qoder-intl",
     "quwork",
@@ -37,7 +36,6 @@ members = [
     "zcode",
     "zcode-intl",
     "cline-free",
-    "cline-pass",
 ]
 
 [profile.release]

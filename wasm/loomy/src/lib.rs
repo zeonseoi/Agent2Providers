@@ -30,7 +30,8 @@ pub const MODEL_BASE: &str = "https://loomyad.xunfei.cn/api/v1";
 pub const CLIENT_VERSION: &str = "0.9.39";
 
 fn metadata() -> Value {
-    json!({
+    use sdk::error_rules::attach;
+    let meta = json!({
         "id": ID, "label": "Loomy", "order": 5,
         "capabilities": {
             "chat": true, "stateful": false, "refresh": false, "model_refresh": true,
@@ -44,7 +45,8 @@ fn metadata() -> Value {
         "checkin": { "description": "每天替账号刷新首次登录积分，不在查询时自动领取",
             "daily": true, "modes": ["checkin"], "onboarding": true },
         "default_models": []
-    })
+    });
+    attach(meta, vec![], vec![])
 }
 
 fn handle(method: &str, params: Value) -> Result<Value> {
@@ -87,12 +89,12 @@ fn handle(method: &str, params: Value) -> Result<Value> {
         "claim" => onboarding::claim(params["claim"].as_str().unwrap_or("")),
         "claim.status" => onboarding::status(params["refresh"].as_bool().unwrap_or(false)),
         "conversation" => {
-            chat::forward(&params)?;
+            chat::forward(params)?;
             Ok(Value::Null)
         }
         "images.capabilities" => Ok(json!({ "generation": true, "editing": true })),
-        "images.generate" => images::generate(&params, false),
-        "images.edit" => images::generate(&params, true),
+        "images.generate" => images::generate(params, false),
+        "images.edit" => images::generate(params, true),
         "login.start" => sms::start(&params),
         "login.poll" => sms::poll(&params),
         "login.callback" => sms::callback(&params),

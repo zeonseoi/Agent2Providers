@@ -34,7 +34,8 @@ use agent2api_wasm_sdk::{json, Error, Result, Value};
 agent2api_wasm_sdk::export_provider!(handle);
 
 fn metadata() -> Value {
-    json!({ "id": "raccoon", "label": "小浣熊", "order": 7,
+    use agent2api_wasm_sdk::error_rules::attach;
+    let meta = json!({ "id": "raccoon", "label": "小浣熊", "order": 7,
         "capabilities": { "chat": true, "stateful": false, "refresh": true, "model_refresh": true, "usage": true,
             "checkin": true, "claims": true, "web_login": true, "sse_model_rewrite": true, "sse_strip_newline_chunks": false,
             "anonymous_default_session": false, "system_proxy_when_unset": false, "refresh_uses_account": true,
@@ -46,7 +47,8 @@ fn metadata() -> Value {
         ],
         "account_features": { "usage": true, "credit_detail": true, "identifier": ["userId", "uid"], "expiry": ["expiresAt", "tokenExpiresAt"] },
         "checkin": { "description": "桌面端每日积分：setting_info触发，账单核对到账", "daily": true, "modes": ["checkin"], "onboarding": true },
-        "default_models": fallback::models(), "settings_schema": config::schema(), "settings_group": { "label": "小浣熊" } })
+        "default_models": fallback::models(), "settings_schema": config::schema(), "settings_group": { "label": "小浣熊" } });
+    attach(meta, vec![], vec![])
 }
 fn handle(method: &str, params: Value) -> Result<Value> {
     match method {
@@ -64,7 +66,7 @@ fn handle(method: &str, params: Value) -> Result<Value> {
         "account.identity" => Ok(json!(account::identity(&params["secret"]))),
         "token.ensure" => Ok(json!(session::ensure(false)?.credential.token)),
         "token.refresh" => Ok(json!(session::ensure(true)?.credential.token)),
-        "token.expiring" => Ok(json!(session::expiring()?)),
+        "token.expiring" => Ok(json!(session::expiring(agent2api_wasm_sdk::expiring_lead(&params, 0))?)),
         "login.start" => login::start(&params),
         "login.poll" => login::poll(&params),
         "login.callback" => login::callback(&params),

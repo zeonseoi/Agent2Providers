@@ -14,7 +14,8 @@ use agent2api_wasm_sdk::{self as sdk, json, Error, Result, Value};
 sdk::export_provider!(handle);
 
 fn metadata() -> Value {
-    json!({
+    use sdk::error_rules::{attach, class};
+    let meta = json!({
         "id": "atomcode", "label": "AtomCode", "order": 14,
         "capabilities": {
             "chat": true, "stateful": false, "refresh": true, "model_refresh": true,
@@ -30,7 +31,14 @@ fn metadata() -> Value {
             "daily": false, "modes": ["checkin"]
         },
         "default_models": []
-    })
+    });
+    attach(
+        meta,
+        vec![
+            class("bad_request", &[400, 413, 422], &["atomcode_client_rejected", "atomcode_parameter_rejected", "atomcode_request_policy"]),
+        ],
+        vec![],
+    )
 }
 
 fn handle(method: &str, params: Value) -> Result<Value> {
@@ -46,7 +54,10 @@ fn handle(method: &str, params: Value) -> Result<Value> {
         "account.identity" => Ok(json!(account::identity(&params["secret"]))),
         "token.ensure" => Ok(json!(account::ensure()?)),
         "token.refresh" => Ok(json!(account::refresh()?)),
-        "token.expiring" => Ok(json!(account::expiring(&sdk::account()?["secret"]))),
+        "token.expiring" => Ok(json!(account::expiring_within(
+            &sdk::account()?["secret"],
+            sdk::expiring_lead(&params, 0),
+        ))),
         "login.start" => login::start(&params),
         "login.poll" => login::poll(&params),
         "login.cancel" => login::cancel(),
@@ -64,16 +75,11 @@ fn handle(method: &str, params: Value) -> Result<Value> {
             Ok(json!({ "success": report["outcome"] == "claimed" || report["outcome"] == "done",
                 "message": report["message"], "report": report }))
         }
-        "conversation" => { chat::forward(&params)?; Ok(Value::Null) }
+        "conversation" => { chat::forward(params)?; Ok(Value::Null) }
         "classify" => Ok(errors::classify(params["status"].as_u64().unwrap_or(502) as u16, &params["body"])),
         "is_error_response" => Ok(json!(params["status"].as_u64().unwrap_or(502) >= 400
             || errors::business_error(&params["body"]))),
-        "error.policy" => {
-            let body = params["body"].to_string();
-            let stop = ["ATOMCODE_SIG_", "ATOMCODE_UA_", "ATOMCODE_VER_", "atomcode_client_rejected",
-                "atomcode_parameter_rejected", "atomcode_request_policy"].iter().any(|marker| body.contains(marker));
-            Ok(json!({ "stop": stop }))
-        }
+        "error.policy" => Ok(json!({ "stop": false })),
         "retry.decision" => Ok(json!({ "action": "default" })),
         "retry_advice" => Ok(Value::Null),
         "cooldown_models" => Ok(json!({ "models": [] })),

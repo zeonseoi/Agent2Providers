@@ -30,7 +30,8 @@ use agent2api_wasm_sdk::{self as sdk, json, Error, Result, Value};
 sdk::export_provider!(handle);
 
 fn metadata() -> Value {
-    json!({ "id": endpoints::PROVIDER, "label": "AutoClaw 国际版", "order": 11,
+    use sdk::error_rules::attach;
+    let meta = json!({ "id": endpoints::PROVIDER, "label": "AutoClaw 国际版", "order": 11,
         "capabilities": { "chat": true, "stateful": false, "refresh": true, "model_refresh": true,
             "usage": true, "checkin": true, "claims": false, "web_login": login_host::READY,
             "sse_model_rewrite": true, "sse_strip_newline_chunks": true,
@@ -42,7 +43,8 @@ fn metadata() -> Value {
             "expiry": ["expiresAt", "tokenExpiresAt"] },
         "checkin": { "description": "国际版每日签到任务，并核对登录活跃活动奖励", "modes": ["checkin"], "daily": true },
         "settings_schema": config::schema(), "settings_group": { "label": "AutoClaw 国际版" },
-        "default_models": models::defaults() })
+        "default_models": models::defaults() });
+    attach(meta, vec![], vec![])
 }
 
 fn handle(method: &str, params: Value) -> Result<Value> {
@@ -63,13 +65,13 @@ fn handle(method: &str, params: Value) -> Result<Value> {
         )?))),
         "token.ensure" => refresh::ensure().map(|token| json!(token)),
         "token.refresh" => refresh::force().map(|token| json!(token)),
-        "token.expiring" => refresh::due().map(|due| json!(due)),
+        "token.expiring" => refresh::due(sdk::expiring_lead(&params, 0)).map(|due| json!(due)),
         "models.list" => models::cached(),
         "models.refresh" => models::refresh(&params),
         "usage.query" => usage::query(),
         "checkin.claim" => checkin::claim(),
         "conversation" => {
-            chat::forward(&params)?;
+            chat::forward(params)?;
             Ok(Value::Null)
         }
         "login.start" => login::start(&params),

@@ -1,4 +1,4 @@
-//! 单独的Cline免费池；共享目录中仅放可复用实现，不声明/加载订阅池。
+//! 单独的 Cline 免费池 WASM 插件。
 
 #[path = "../../cline-common/account.rs"]
 mod account;
@@ -32,13 +32,21 @@ pub const PROVIDER_ID: &str = "cline-free";
 sdk::export_provider!(handle);
 
 fn metadata() -> Value {
-    json!({ "id": PROVIDER_ID, "label": "Cline 免费池", "order": 17,
+    use sdk::error_rules::{attach, class};
+    let meta = json!({ "id": PROVIDER_ID, "label": "Cline 免费池", "order": 17,
         "capabilities": { "chat": true, "stateful": false, "refresh": true, "model_refresh": true,
             "usage": true, "checkin": false, "claims": false, "web_login": true, "sse_model_rewrite": true,
             "refresh_uses_account": false, "anonymous_default_session": false, "env_credentials": false },
         "login_methods": [{ "kind": "browser", "button": "浏览器登录" }],
         "account_features": { "usage": true, "identifier": ["uid", "account"], "expiry": ["expiresAt"], "default_limiters": [] },
-        "admin_panels": ["upstream_headers"], "default_models": models::defaults() })
+        "admin_panels": ["upstream_headers"], "default_models": models::defaults() });
+    attach(
+        meta,
+        vec![
+            class("rate_limit", &[429], &[]),
+        ],
+        vec![],
+    )
 }
 
 fn handle(method: &str, params: Value) -> Result<Value> {
@@ -59,11 +67,8 @@ fn handle(method: &str, params: Value) -> Result<Value> {
         "account.view" => Ok(account::view(&params["secret"])),
         "account.identity" => Ok(json!(account::identity(&params["secret"]))),
         "token.ensure" => Ok(json!(refresh::token(false)?)),
-        "token.refresh" => {
-            if params["desktopRefresh"] == true { Ok(json!(refresh::token(true)?)) }
-            else { sdk::host("credential.cline-free.refresh", json!({})) }
-        },
-        "token.expiring" => Ok(json!(refresh::due()?)),
+        "token.refresh" => Ok(json!(refresh::token(true)?)),
+        "token.expiring" => Ok(json!(refresh::due(sdk::expiring_lead(&params, 0))?)),
         "login.start" => login::start(&params),
         "login.poll" => login::poll(&params),
         "login.cancel" => login::cancel(),
@@ -71,7 +76,7 @@ fn handle(method: &str, params: Value) -> Result<Value> {
         "models.refresh" => models::refresh(),
         "usage.query" => usage::query(),
         "conversation" => {
-            chat::forward(&params)?;
+            chat::forward(params)?;
             Ok(Value::Null)
         }
         "classify" => Ok(errors::classify(
